@@ -1423,6 +1423,11 @@ def login_user(username, password):
     role = authenticate_user(username, password)
 
     if role is None:
+        audit_write(
+            event_type="LOGIN_FAILED",
+            session_id=f"login-{uuid.uuid4().hex[:12]}",
+            error_message="Invalid username or password",
+        )
         return (
             gr.update(visible=True),
             gr.update(visible=False),
@@ -1431,6 +1436,11 @@ def login_user(username, password):
             "Tester",
             gr.update(visible=False),
         )
+
+    audit_write(
+        event_type="LOGIN_SUCCESS",
+        session_id=f"{role}:login-{uuid.uuid4().hex[:12]}",
+    )
 
     # The role is later included in the audit session identifier.
     badge = (
@@ -2201,6 +2211,8 @@ publication gate, integrity score, report generation and errors.
                     label="Application Audit Events",
                     interactive=False,
                     wrap=True,
+                    value=pd.DataFrame(),
+                    height=420,
                 )
 
                 audit_download = gr.File(
@@ -2259,6 +2271,24 @@ publication gate, integrity score, report generation and errors.
             session_role,
             audit_tab,
         ],
+    )
+
+    # Administrator login automatically loads the audit trail.
+    # The same admin PIN is used for both authentication and
+    # audit access in this research/demo prototype.
+    def load_admin_logs_after_login(username, password):
+        role = authenticate_user(username, password)
+        if role == "Administrator":
+            return (
+                "1234",
+                *admin_view_audit("1234", 500),
+            )
+        return "", "🔒 Administrator-only activity log.", pd.DataFrame()
+
+    login_btn.click(
+        fn=load_admin_logs_after_login,
+        inputs=[login_username, login_password],
+        outputs=[admin_pin, audit_status, audit_table],
     )
 
     logout_btn.click(
