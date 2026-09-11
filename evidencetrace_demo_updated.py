@@ -1429,47 +1429,97 @@ def login_user(username, password):
             error_message="Invalid username or password",
         )
         return (
-            gr.update(visible=True),
-            gr.update(visible=False),
-            "",
+            gr.update(visible=True),   # login screen
+            gr.update(visible=False),  # app shell
+            "",                        # badge
             "❌ Invalid username or password.",
-            "Tester",
-            gr.update(visible=False),
+            "Tester",                  # role state
+            gr.update(visible=False),  # admin console
+            "🔒 Administrator audit trail.",
+            pd.DataFrame(),            # audit table
+            None,                      # audit download
+            None,                      # pdf
+            None,                      # report
+            "<div class='section-card'><div class='section-title'>Ready for analysis</div>"
+            "<div class='section-subtitle'>Upload a PDF and select <b>Analyze Document</b>.</div></div>",
+            pd.DataFrame(),            # findings
+            pd.DataFrame(),            # refs
+            pd.DataFrame(),            # claims
         )
 
+    session_id = f"{role}:login-{uuid.uuid4().hex[:12]}"
     audit_write(
         event_type="LOGIN_SUCCESS",
-        session_id=f"{role}:login-{uuid.uuid4().hex[:12]}",
+        session_id=session_id,
     )
 
-    # The role is later included in the audit session identifier.
     badge = (
         f"**{role}** workspace  ·  "
         + (
-            "Audit Trail access enabled"
+            "Administrator console enabled"
             if role == "Administrator"
             else "Document analysis enabled"
         )
     )
 
+    audit_status_text, audit_df = (
+        show_audit_log(ADMIN_PIN, 500)
+        if role == "Administrator"
+        else ("🔒 Tester workspace — administrator audit trail is restricted.", pd.DataFrame())
+    )
+
     return (
-        gr.update(visible=False),
-        gr.update(visible=True),
+        gr.update(visible=False),       # login screen
+        gr.update(visible=True),        # app shell
         badge,
         "",
         role,
         gr.update(visible=(role == "Administrator")),
+        audit_status_text,
+        audit_df,
+        None,
+        None,
+        None,
+        "<div class='section-card'><div class='section-title'>Ready for analysis</div>"
+        "<div class='section-subtitle'>Upload a PDF and select <b>Analyze Document</b>.</div></div>",
+        pd.DataFrame(),
+        pd.DataFrame(),
+        pd.DataFrame(),
     )
 
 
-def logout_user():
+def logout_user(request: gr.Request = None):
+    session_id = ""
+    if request is not None:
+        session_id = getattr(request, "session_hash", "") or ""
+    if not session_id:
+        session_id = f"anon-{uuid.uuid4().hex[:12]}"
+
+    audit_write(
+        event_type="LOGOUT",
+        session_id=session_id,
+    )
+
+    # Return every user-facing analysis component to its initial state.
+    # The browser is also reloaded by the JS attached to this event,
+    # ensuring no previous document/result remains on screen.
     return (
-        gr.update(visible=True),
-        gr.update(visible=False),
+        gr.update(visible=True),   # login screen
+        gr.update(visible=False),  # app shell
         "",
         "",
         "Tester",
-        gr.update(visible=False),
+        gr.update(visible=False), # admin console
+        "🔒 Administrator audit trail.",
+        pd.DataFrame(),
+        None,
+        None,                      # pdf
+        None,                      # report
+        "<div class='section-card'><div class='section-title'>Ready for analysis</div>"
+        "<div class='section-subtitle'>Upload a PDF and select <b>Analyze Document</b>.</div></div>",
+        pd.DataFrame(),            # findings
+        pd.DataFrame(),            # refs
+        pd.DataFrame(),            # claims
     )
 
 
@@ -1931,6 +1981,13 @@ footer,
 }
 
 /* ---------------- Audit trail ---------------- */
+#admin-console {
+    margin-top: 28px;
+}
+#admin-console .section-card {
+    margin-bottom: 14px;
+}
+
 
 #audit-panel {
     background:var(--et-surface) !important;
@@ -2165,77 +2222,71 @@ A one-page executive result report is generated automatically after analysis.
                     elem_id="claims-panel",
                 )
 
-            with gr.Tab("Audit Trail", visible=False) as audit_tab:
-                gr.Markdown(
-                    """
-### Administrator audit trail
+        # ====================================================
+        # Administrator-only console
+        # ====================================================
+        # This is deliberately a separate panel from the tester
+        # workspace. Testers never receive the audit controls.
+        with gr.Column(visible=False, elem_id="admin-console") as admin_console:
+            gr.HTML(
+                """
+<div class="section-card">
+  <div class="section-title">Administrator Console</div>
+  <div class="section-subtitle">
+    Restricted application activity and assurance audit trail.
+    Uploaded PDF contents are not stored.
+  </div>
+</div>
+                """
+            )
 
-This view records application activity without storing uploaded PDF contents.
-
-**Logged:** timestamp, anonymous session ID, file name, analysis metrics,
-publication gate, integrity score, report generation and errors.
-"""
+            with gr.Row():
+                admin_refresh_btn = gr.Button(
+                    "Refresh Audit Trail",
+                    variant="primary",
+                )
+                admin_export_btn = gr.Button(
+                    "Export Audit CSV",
+                    variant="secondary",
+                )
+                admin_clear_btn = gr.Button(
+                    "Clear Audit Trail",
+                    variant="stop",
                 )
 
-                with gr.Row():
-                    admin_pin = gr.Textbox(
-                        label="Administrator PIN",
-                        type="password",
-                        placeholder="Enter administrator PIN",
-                    )
-                    audit_limit = gr.Number(
-                        label="Maximum events",
-                        value=500,
-                        precision=0,
-                    )
+            audit_status = gr.Markdown(
+                "Loading administrator audit trail..."
+            )
 
-                with gr.Row():
-                    view_logs_btn = gr.Button(
-                        "View Audit Log",
-                        variant="primary",
-                    )
-                    export_logs_btn = gr.Button(
-                        "Export Audit CSV",
-                        variant="secondary",
-                    )
-                    clear_logs_btn = gr.Button(
-                        "Clear Audit Log",
-                        variant="stop",
-                    )
+            audit_table = gr.Dataframe(
+                label="Application Audit Events",
+                interactive=False,
+                wrap=True,
+                value=pd.DataFrame(),
+            )
 
-                audit_status = gr.Markdown(
-                    "🔒 Administrator-only activity log."
-                )
+            audit_download = gr.File(
+                label="Audit CSV export",
+                interactive=False,
+            )
 
-                audit_table = gr.Dataframe(
-                    label="Application Audit Events",
-                    interactive=False,
-                    wrap=True,
-                    value=pd.DataFrame(),
-                )
+            admin_refresh_btn.click(
+                fn=lambda: show_audit_log(ADMIN_PIN, 500),
+                inputs=[],
+                outputs=[audit_status, audit_table],
+            )
 
-                audit_download = gr.File(
-                    label="Audit CSV",
-                    interactive=False,
-                )
+            admin_export_btn.click(
+                fn=lambda: admin_export_audit(ADMIN_PIN, 500),
+                inputs=[],
+                outputs=[audit_status, audit_download],
+            )
 
-                view_logs_btn.click(
-                    fn=admin_view_audit,
-                    inputs=[admin_pin, audit_limit],
-                    outputs=[audit_status, audit_table],
-                )
-
-                export_logs_btn.click(
-                    fn=admin_export_audit,
-                    inputs=[admin_pin, audit_limit],
-                    outputs=[audit_status, audit_download],
-                )
-
-                clear_logs_btn.click(
-                    fn=admin_clear_audit,
-                    inputs=[admin_pin],
-                    outputs=[audit_status, audit_table],
-                )
+            admin_clear_btn.click(
+                fn=lambda: admin_clear_audit(ADMIN_PIN),
+                inputs=[],
+                outputs=[audit_status, audit_table],
+            )
 
         gr.HTML(
             """
@@ -2268,28 +2319,21 @@ publication gate, integrity score, report generation and errors.
             session_badge,
             login_error,
             session_role,
-            audit_tab,
+            admin_console,
+            audit_status,
+            audit_table,
+            audit_download,
+            pdf,
+            report_file,
+            summary,
+            findings,
+            refs,
+            claims,
         ],
     )
 
-    # Administrator login automatically loads the audit trail.
-    # The same admin PIN is used for both authentication and
-    # audit access in this research/demo prototype.
-    def load_admin_logs_after_login(username, password):
-        role = authenticate_user(username, password)
-        if role == "Administrator":
-            return (
-                "1234",
-                *admin_view_audit("1234", 500),
-            )
-        return "", "🔒 Administrator-only activity log.", pd.DataFrame()
-
-    login_btn.click(
-        fn=load_admin_logs_after_login,
-        inputs=[login_username, login_password],
-        outputs=[admin_pin, audit_status, audit_table],
-    )
-
+    # Sign out clears the entire workspace and then reloads the browser
+    # so the next user starts with a clean login page.
     logout_btn.click(
         fn=logout_user,
         inputs=[],
@@ -2299,8 +2343,18 @@ publication gate, integrity score, report generation and errors.
             session_badge,
             login_error,
             session_role,
-            audit_tab,
+            admin_console,
+            audit_status,
+            audit_table,
+            audit_download,
+            pdf,
+            report_file,
+            summary,
+            findings,
+            refs,
+            claims,
         ],
+        js="() => { setTimeout(() => window.location.reload(), 150); }",
     )
 
 if __name__ == "__main__":
