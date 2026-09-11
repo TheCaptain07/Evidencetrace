@@ -40,7 +40,10 @@ from sklearn.metrics.pairwise import cosine_similarity
 # ============================================================
 
 AUDIT_DB = Path(
-    os.getenv("EVIDENCETRACE_AUDIT_DB", "evidencetrace_audit.db")
+    os.getenv(
+        "EVIDENCETRACE_AUDIT_DB",
+        "evidencetrace_audit.db",
+    )
 )
 ADMIN_PIN = os.getenv("EVIDENCETRACE_ADMIN_PIN", "1234")
 
@@ -1147,7 +1150,7 @@ def create_result_report(
 
 
 
-def run_analysis(file_obj, request: gr.Request = None):
+def run_analysis(file_obj, role="Tester", request: gr.Request = None):
     if file_obj is None:
         return (
             "<h2>Please upload a PDF.</h2>",
@@ -1290,7 +1293,7 @@ def run_analysis(file_obj, request: gr.Request = None):
         # -----------------------------------------------
         audit_write(
             event_type="ANALYSIS",
-            session_id=session_id,
+            session_id=f"{role}:{session_id}",
             file_name=file_name,
             file_size_bytes=file_size,
             pages=len(pages),
@@ -1311,7 +1314,7 @@ def run_analysis(file_obj, request: gr.Request = None):
 
         audit_write(
             event_type="REPORT_GENERATED",
-            session_id=session_id,
+            session_id=f"{role}:{session_id}",
             file_name=file_name,
             pages=len(pages),
             publication_gate=gate,
@@ -1331,7 +1334,7 @@ def run_analysis(file_obj, request: gr.Request = None):
         try:
             audit_write(
                 event_type="ANALYSIS_ERROR",
-                session_id=session_id,
+                session_id=f"{role}:{session_id}",
                 file_name=Path(
                     file_obj if isinstance(file_obj, str)
                     else getattr(file_obj, "name", "unknown.pdf")
@@ -1389,313 +1392,564 @@ The detailed event log is shown below. Uploaded document contents are **not stor
     return overview, df
 
 
+
 # ============================================================
-# Professional Gradio UI
+# Demo authentication / role handling
+# ============================================================
+# Conference/research prototype only. For production, replace
+# this with enterprise SSO/OIDC and hashed credential storage.
 # ============================================================
 
+DEMO_TESTER_USERNAME = os.getenv("EVIDENCETRACE_TESTER_USERNAME", "tester")
+DEMO_TESTER_PASSWORD = os.getenv("EVIDENCETRACE_TESTER_PASSWORD", "demo123")
+
+DEMO_ADMIN_USERNAME = os.getenv("EVIDENCETRACE_ADMIN_USERNAME", "admin")
+DEMO_ADMIN_PASSWORD = os.getenv("EVIDENCETRACE_ADMIN_PASSWORD", "1234")
+
+
+def authenticate_user(username: str, password: str):
+    username = (username or "").strip()
+
+    if username == DEMO_ADMIN_USERNAME and password == DEMO_ADMIN_PASSWORD:
+        return "Administrator"
+
+    if username == DEMO_TESTER_USERNAME and password == DEMO_TESTER_PASSWORD:
+        return "Tester"
+
+    return None
+
+
+def login_user(username, password):
+    role = authenticate_user(username, password)
+
+    if role is None:
+        return (
+            gr.update(visible=True),
+            gr.update(visible=False),
+            "",
+            "❌ Invalid username or password.",
+            "Tester",
+            gr.update(visible=False),
+        )
+
+    # The role is later included in the audit session identifier.
+    badge = (
+        f"**{role}** workspace  ·  "
+        + (
+            "Audit Trail access enabled"
+            if role == "Administrator"
+            else "Document analysis enabled"
+        )
+    )
+
+    return (
+        gr.update(visible=False),
+        gr.update(visible=True),
+        badge,
+        "",
+        role,
+        gr.update(visible=(role == "Administrator")),
+    )
+
+
+def logout_user():
+    return (
+        gr.update(visible=True),
+        gr.update(visible=False),
+        "",
+        "",
+        "Tester",
+        gr.update(visible=False),
+    )
+
+
+def admin_export_audit(pin, limit=500):
+    if str(pin or "").strip() != ADMIN_PIN:
+        return "❌ Incorrect administrator PIN.", None
+
+    df = load_audit_dataframe(limit=int(limit))
+
+    export_path = Path(
+        f"EvidenceTrace_Audit_Log_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.csv"
+    )
+    df.to_csv(export_path, index=False)
+
+    return f"✅ Export ready: {len(df)} event(s).", str(export_path)
+
+
+def admin_view_audit(pin, limit=500):
+    return show_audit_log(pin, limit)
+
+
+def admin_clear_audit(pin):
+    return clear_audit_log(pin)
+
+
+# ============================================================
+# EvidenceTrace — Human-Centric Enterprise UI + Login
 # ============================================================
 
 CUSTOM_CSS = """
-/* EvidenceTrace enterprise presentation layer */
-footer {
-    display: none !important;
-}
-
-.gradio-footer,
-footer,
-[data-testid="gradio-footer"] {
-    display: none !important;
-}
-
 :root {
-    --navy: #0b1f33;
-    --navy-2: #12324a;
-    --teal: #0f766e;
-    --teal-2: #149f93;
-    --blue: #2563eb;
-    --ink: #172b3a;
-    --muted: #607483;
-    --line: #dbe5ea;
-    --surface: #ffffff;
-    --surface-2: #f5f8fa;
-    --success: #087443;
-    --success-bg: #e9f7ef;
-    --warning: #b45309;
-    --warning-bg: #fff4df;
-    --danger: #b42318;
-    --danger-bg: #fdeceb;
+    --et-bg:#f7f7f5;
+    --et-surface:#ffffff;
+    --et-surface-soft:#fbfbfa;
+    --et-ink:#1f2328;
+    --et-ink-2:#343a40;
+    --et-muted:#68727d;
+    --et-line:#e5e7eb;
+    --et-line-strong:#d7dbe0;
+    --et-green:#19a974;
+    --et-green-dark:#12805a;
+    --et-green-soft:#eaf8f1;
+    --et-blue:#2563eb;
+    --et-blue-soft:#edf3ff;
+    --et-amber:#b45309;
+    --et-red:#b42318;
+    --et-red-soft:#fff0ee;
+    --et-shadow:0 1px 2px rgba(31,35,40,.04),0 6px 24px rgba(31,35,40,.055);
+    --et-radius-sm:10px;
+    --et-radius-md:14px;
+    --et-radius-lg:18px;
+}
+
+html, body {
+    background:var(--et-bg) !important;
+}
+
+body,
+.gradio-container,
+.gradio-container * {
+    font-family:Inter,ui-sans-serif,-apple-system,BlinkMacSystemFont,
+    "Segoe UI",Roboto,Helvetica,Arial,sans-serif !important;
+    color:var(--et-ink);
 }
 
 .gradio-container {
-    max-width: 1450px !important;
-    margin: 0 auto !important;
-    padding: 0 26px 28px !important;
-    background: #f4f7f9 !important;
+    max-width:1480px !important;
+    margin:0 auto !important;
+    padding:18px 26px 24px !important;
+    background:var(--et-bg) !important;
 }
 
-body {
-    background: #f4f7f9 !important;
+/* Hide visible Gradio product chrome */
+footer,
+.gradio-footer,
+[data-testid="gradio-footer"] {
+    display:none !important;
 }
+
+/* ---------------- Login ---------------- */
+
+#login-screen {
+    width:100%;
+    max-width:540px;
+    margin:56px auto 40px !important;
+}
+
+.login-shell {
+    background:var(--et-surface) !important;
+    border:1px solid var(--et-line) !important;
+    border-radius:22px;
+    overflow:hidden;
+    box-shadow:0 14px 42px rgba(31,35,40,.08);
+}
+
+.login-brand {
+    display:flex;
+    align-items:center;
+    gap:13px;
+    padding:22px 23px 19px;
+    border-bottom:1px solid var(--et-line);
+}
+
+.login-mark {
+    width:46px;
+    height:46px;
+    display:grid;
+    place-items:center;
+    border-radius:13px;
+    background:var(--et-green) !important;
+    color:#fff !important;
+    font-size:14px;
+    font-weight:850;
+    letter-spacing:.03em;
+}
+
+.login-title {
+    color:var(--et-ink) !important;
+    font-size:24px;
+    font-weight:850;
+    letter-spacing:-.04em;
+}
+
+.login-subtitle {
+    color:var(--et-muted) !important;
+    font-size:10.5px;
+    margin-top:3px;
+}
+
+.login-card {
+    padding:23px;
+}
+
+.login-eyebrow {
+    color:var(--et-green-dark) !important;
+    font-size:9px;
+    letter-spacing:.12em;
+    font-weight:850;
+    text-transform:uppercase;
+}
+
+.login-heading {
+    color:var(--et-ink) !important;
+    font-size:22px;
+    line-height:1.18;
+    font-weight:850;
+    letter-spacing:-.035em;
+    margin-top:7px;
+}
+
+.login-copy {
+    color:var(--et-muted) !important;
+    font-size:11px;
+    line-height:1.65;
+    margin-top:8px;
+}
+
+#login-btn {
+    width:100%;
+    min-height:46px !important;
+    margin-top:8px;
+    background:var(--et-green) !important;
+    border:1px solid var(--et-green) !important;
+    color:#fff !important;
+    font-weight:800 !important;
+    border-radius:10px !important;
+    box-shadow:0 6px 16px rgba(25,169,116,.18) !important;
+}
+
+#login-btn:hover {
+    background:var(--et-green-dark) !important;
+    border-color:var(--et-green-dark) !important;
+}
+
+#login-message {
+    margin-top:7px;
+    min-height:22px;
+    font-size:10.5px;
+}
+
+.demo-credentials {
+    margin-top:14px;
+    padding:11px 12px;
+    background:#f7f9fa !important;
+    border:1px solid var(--et-line) !important;
+    border-radius:10px;
+    color:var(--et-muted) !important;
+    font-size:9.5px;
+    line-height:1.65;
+}
+
+.demo-credentials code {
+    background:#eef1f3 !important;
+    color:var(--et-ink) !important;
+    padding:2px 5px;
+    border-radius:5px;
+}
+
+/* ---------------- Application header ---------------- */
 
 #et-header {
-    background: linear-gradient(120deg, var(--navy), var(--navy-2));
-    border-radius: 18px;
-    padding: 24px 28px;
-    margin: 8px 0 18px;
-    box-shadow: 0 10px 30px rgba(11,31,51,.12);
+    background:var(--et-surface) !important;
+    border:1px solid var(--et-line) !important;
+    border-radius:18px;
+    padding:18px 20px 14px;
+    margin-bottom:12px;
+    box-shadow:var(--et-shadow);
 }
 
 #et-brand {
-    display: flex;
-    align-items: center;
-    gap: 14px;
+    display:flex;
+    align-items:center;
+    gap:14px;
 }
 
 #et-mark {
-    width: 48px;
-    height: 48px;
-    border-radius: 13px;
-    display: grid;
-    place-items: center;
-    background: linear-gradient(135deg, #8ce7d4, #3db9a8);
-    color: #073b38;
-    font-weight: 900;
-    font-size: 22px;
+    width:46px;
+    height:46px;
+    flex:0 0 46px;
+    border-radius:13px;
+    display:grid;
+    place-items:center;
+    background:var(--et-green) !important;
+    color:#fff !important;
+    font-weight:850;
+    font-size:14px;
+    letter-spacing:.03em;
+    box-shadow:0 5px 14px rgba(25,169,116,.20);
 }
 
 #et-title {
-    color: #fff;
-    font-size: 27px;
-    font-weight: 800;
-    letter-spacing: -.04em;
-    line-height: 1.05;
+    color:var(--et-ink) !important;
+    font-size:25px;
+    font-weight:850;
+    letter-spacing:-.04em;
+    line-height:1.05;
 }
 
 #et-subtitle {
-    color: #b8ccd8;
-    font-size: 12px;
-    margin-top: 4px;
+    color:var(--et-muted) !important;
+    font-size:11px;
+    margin-top:4px;
 }
 
 #et-tag {
-    margin-left: auto;
-    border: 1px solid rgba(255,255,255,.2);
-    color: #d8edf3;
-    border-radius: 999px;
-    padding: 7px 12px;
-    font-size: 11px;
-    font-weight: 700;
+    margin-left:auto;
+    color:var(--et-green-dark) !important;
+    background:var(--et-green-soft) !important;
+    border:1px solid #cdebdc;
+    border-radius:999px;
+    padding:7px 10px;
+    font-size:8.5px;
+    letter-spacing:.06em;
+    font-weight:850;
 }
 
 #et-header-line {
-    display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
-    margin-top: 15px;
-    padding-top: 12px;
-    border-top: 1px solid rgba(255,255,255,.12);
+    display:flex;
+    gap:6px;
+    flex-wrap:wrap;
+    margin-top:12px;
+    padding-top:11px;
+    border-top:1px solid var(--et-line);
 }
 
 #et-header-line span {
-    display: inline-block;
-    color: #b9cdd8;
-    background: rgba(255,255,255,.055);
-    border: 1px solid rgba(255,255,255,.10);
-    border-radius: 999px;
-    padding: 5px 9px;
-    font-size: 9px;
-    letter-spacing: .08em;
-    font-weight: 800;
+    color:var(--et-muted) !important;
+    background:#f5f6f7 !important;
+    border:1px solid var(--et-line);
+    border-radius:999px;
+    padding:5px 8px;
+    font-size:7.5px;
+    letter-spacing:.075em;
+    font-weight:800;
 }
 
-#upload-panel .wrap,
-#download-panel .wrap {
-    color: var(--ink);
+/* ---------------- Session bar ---------------- */
+
+#session-bar {
+    background:var(--et-surface) !important;
+    border:1px solid var(--et-line) !important;
+    border-radius:12px;
+    padding:6px 9px !important;
+    margin-bottom:12px;
+    box-shadow:0 1px 2px rgba(31,35,40,.03);
 }
 
-.gradio-container input[type="file"] {
-    border-color: var(--line) !important;
+#session-badge {
+    color:var(--et-green-dark) !important;
+    font-size:10px;
+    padding-left:4px;
+    margin-top:3px;
 }
 
-.gradio-container button {
-    transition: transform .15s ease, box-shadow .15s ease, filter .15s ease;
+#logout-btn {
+    min-height:36px !important;
+    background:var(--et-surface) !important;
+    color:var(--et-ink-2) !important;
+    border:1px solid var(--et-line-strong) !important;
+    border-radius:9px !important;
 }
 
-.gradio-container button:hover {
-    transform: translateY(-1px);
+/* ---------------- Main panels ---------------- */
+
+#upload-panel,
+#download-panel,
+#summary-panel,
+#findings-panel,
+#refs-panel,
+#claims-panel {
+    background:var(--et-surface) !important;
+    border:1px solid var(--et-line) !important;
+    border-radius:var(--et-radius-md) !important;
+    box-shadow:var(--et-shadow) !important;
 }
 
-
-.section-card {
-    background: var(--surface);
-    border: 1px solid var(--line);
-    border-radius: 15px;
-    padding: 16px 18px;
-    box-shadow: 0 6px 18px rgba(16,42,67,.05);
+#upload-panel,
+#download-panel {
+    padding:17px !important;
 }
 
 .section-title {
-    color: var(--ink);
-    font-size: 14px;
-    font-weight: 800;
-    margin-bottom: 4px;
+    color:var(--et-ink) !important;
+    font-size:14px;
+    font-weight:800;
+    letter-spacing:-.015em;
+    margin-bottom:4px;
 }
 
 .section-subtitle {
-    color: var(--muted);
-    font-size: 11px;
-    line-height: 1.5;
+    color:var(--et-muted) !important;
+    font-size:10.5px;
+    line-height:1.6;
 }
 
-#upload-panel {
-    background: #fff;
-    border: 1px solid var(--line);
-    border-radius: 15px;
-    padding: 15px;
-    box-shadow: 0 6px 18px rgba(16,42,67,.05);
+[data-testid="fileDrop"] {
+    background:var(--et-surface-soft) !important;
+    border:1px dashed var(--et-line-strong) !important;
+    border-radius:var(--et-radius-sm) !important;
 }
 
-#upload-panel label {
-    font-weight: 700 !important;
-    color: var(--ink) !important;
+[data-testid="fileDrop"]:hover {
+    border-color:var(--et-green) !important;
+    background:#f8fcfa !important;
 }
 
 #analyze-btn {
-    background: linear-gradient(135deg, var(--teal), var(--teal-2)) !important;
-    color: #fff !important;
-    border: none !important;
-    border-radius: 10px !important;
-    min-height: 48px !important;
-    font-weight: 800 !important;
-    box-shadow: 0 8px 20px rgba(15,118,110,.22) !important;
+    background:var(--et-green) !important;
+    border:1px solid var(--et-green) !important;
+    color:#fff !important;
+    border-radius:10px !important;
+    min-height:45px !important;
+    font-weight:800 !important;
+    box-shadow:0 6px 16px rgba(25,169,116,.18) !important;
 }
 
 #analyze-btn:hover {
-    filter: brightness(1.05);
+    background:var(--et-green-dark) !important;
 }
 
-#download-panel {
-    background: #fff;
-    border: 1px solid var(--line);
-    border-radius: 15px;
-    padding: 12px;
-    box-shadow: 0 6px 18px rgba(16,42,67,.05);
+.gradio-container button {
+    transition:transform .14s ease,box-shadow .14s ease,filter .14s ease !important;
 }
+
+.gradio-container button:hover {
+    transform:translateY(-1px);
+}
+
+/* ---------------- Research note ---------------- */
+
+#research-note {
+    background:var(--et-surface) !important;
+    border:1px solid var(--et-line) !important;
+    border-left:4px solid var(--et-green) !important;
+    border-radius:var(--et-radius-md);
+    padding:13px 15px;
+    color:var(--et-ink) !important;
+    font-size:10.5px;
+    line-height:1.65;
+    margin-top:13px;
+    box-shadow:0 1px 2px rgba(31,35,40,.025);
+}
+
+/* ---------------- Results ---------------- */
 
 #summary-panel {
-    background: #fff;
-    border: 1px solid var(--line);
-    border-radius: 15px;
-    padding: 3px 4px;
-    min-height: 345px;
-    box-shadow: 0 6px 18px rgba(16,42,67,.05);
+    padding:5px !important;
+    min-height:330px;
 }
 
 #summary-panel h1 {
-    color: var(--ink) !important;
-    font-size: 24px !important;
-    margin-bottom: 6px !important;
+    color:var(--et-ink) !important;
+    font-size:24px !important;
+    font-weight:850 !important;
+    letter-spacing:-.035em;
 }
 
 #summary-panel h2 {
-    color: var(--ink) !important;
-    margin-top: 6px !important;
+    color:var(--et-ink) !important;
+    font-weight:850 !important;
 }
 
 #summary-panel table {
-    border-collapse: separate !important;
-    border-spacing: 0 !important;
-    width: 100% !important;
-    overflow: hidden;
-    border: 1px solid var(--line);
-    border-radius: 10px;
+    width:100% !important;
+    border-collapse:separate !important;
+    border-spacing:0 !important;
+    border:1px solid var(--et-line);
+    border-radius:11px;
+    overflow:hidden;
 }
 
 #summary-panel th {
-    background: #eaf2f8 !important;
-    color: var(--navy) !important;
-    font-weight: 800 !important;
+    background:#f3f5f6 !important;
+    color:var(--et-ink-2) !important;
+    font-weight:800 !important;
 }
 
 #summary-panel td,
 #summary-panel th {
-    padding: 9px 10px !important;
-    border-bottom: 1px solid var(--line);
-    font-size: 12px !important;
+    padding:9px 10px !important;
+    border-bottom:1px solid var(--et-line);
+    font-size:11px !important;
 }
 
 #summary-panel tr:last-child td {
-    border-bottom: none !important;
+    border-bottom:none !important;
 }
 
-#findings-panel,
-#refs-panel,
-#claims-panel {
-    background: #fff !important;
-    border: 1px solid var(--line) !important;
-    border-radius: 15px !important;
-    box-shadow: 0 6px 18px rgba(16,42,67,.05) !important;
-}
+/* ---------------- Tabs ---------------- */
 
 .gradio-tabs {
-    border: none !important;
+    border:1px solid var(--et-line) !important;
+    border-radius:var(--et-radius-md) !important;
+    background:var(--et-surface) !important;
+    box-shadow:var(--et-shadow) !important;
+    overflow:hidden;
 }
 
 .gradio-tabs > .tab-nav {
-    border-bottom: 1px solid var(--line) !important;
-    gap: 4px !important;
+    background:var(--et-surface) !important;
+    border-bottom:1px solid var(--et-line) !important;
+    padding:5px 7px 0 !important;
+    gap:3px !important;
 }
 
 .gradio-tabs > .tab-nav button {
-    color: var(--muted) !important;
-    font-weight: 700 !important;
-    border-radius: 8px 8px 0 0 !important;
+    background:transparent !important;
+    color:var(--et-muted) !important;
+    font-weight:750 !important;
+    border:none !important;
+    border-radius:8px 8px 0 0 !important;
+    min-height:40px !important;
 }
 
 .gradio-tabs > .tab-nav button.selected {
-    color: var(--teal) !important;
-    border-bottom: 2px solid var(--teal) !important;
+    color:var(--et-green-dark) !important;
+    background:var(--et-green-soft) !important;
+    box-shadow:inset 0 -2px 0 var(--et-green) !important;
 }
 
+/* ---------------- Audit trail ---------------- */
 
-#et-audit-badge {
-    background: #eef5f7;
-    border: 1px solid #d5e4e8;
-    color: #274c5b;
-    border-radius: 10px;
-    padding: 9px 11px;
-    font-size: 10px;
-    line-height: 1.5;
+#audit-panel {
+    background:var(--et-surface) !important;
+    border:1px solid var(--et-line) !important;
+    border-radius:var(--et-radius-md) !important;
+    padding:15px !important;
 }
 
-#research-note {
-    background: linear-gradient(135deg, #eef8f6, #f5fafb);
-    border: 1px solid #cce8e2;
-    border-radius: 14px;
-    padding: 14px 16px;
-    color: var(--ink);
-    font-size: 11px;
-    line-height: 1.6;
-}
+/* ---------------- Footer ---------------- */
 
 #footer-note {
-    text-align: center;
-    color: #738592;
-    font-size: 10px;
-    padding: 14px 0 4px;
+    text-align:center;
+    padding:20px 0 8px;
+    color:var(--et-muted) !important;
+    font-size:9.5px;
+    line-height:1.55;
 }
 
-button, input, textarea, select {
-    font-family: Inter, Arial, sans-serif !important;
+#footer-note > div:first-child {
+    color:var(--et-ink) !important;
+    font-size:12px;
+    font-weight:850;
 }
 
-@media (max-width: 900px) {
-    .gradio-container {
-        padding: 0 12px 18px !important;
-    }
-    #et-tag {
-        display: none;
-    }
+@media (max-width:900px) {
+    .gradio-container {padding:12px 12px 20px !important;}
+    #et-header {padding:15px;}
+    #et-tag {display:none;}
+    #et-title {font-size:22px;}
 }
 """
 
@@ -1719,14 +1973,9 @@ HEADER_HTML = """
 
 RESEARCH_NOTE = """
 <div id="research-note">
-<div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#0f766e;font-weight:800;margin-bottom:5px;">
-Evidence integrity workflow
-</div>
-<b>Claim → Citation → Reference → Semantic screening → GRC risk → Publication gate</b><br>
-<span style="color:#607483;">
-EvidenceTrace is a research prototype for surfacing potentially unsupported or weakly supported cybersecurity assurance claims.
-Similarity scores are screening signals, not proof of factual correctness. Final publication decisions require qualified human review.
-</span>
+  <b>Evidence integrity workflow:</b>
+  Claim → Citation → Reference → Semantic screening → GRC risk → Publication gate.
+  EvidenceTrace surfaces potential issues for qualified human review; it does not replace professional judgment.
 </div>
 """
 
@@ -1734,7 +1983,7 @@ with gr.Blocks(
     title="EvidenceTrace | Cybersecurity Assurance",
     css=CUSTOM_CSS,
     theme=gr.themes.Soft(
-        primary_hue="teal",
+        primary_hue="green",
         secondary_hue="blue",
         neutral_hue="slate",
         radius_size="md",
@@ -1742,202 +1991,295 @@ with gr.Blocks(
     ),
 ) as demo:
 
-    gr.HTML(HEADER_HTML)
+    # ========================================================
+    # Login screen
+    # ========================================================
 
-    with gr.Row():
-        with gr.Column(scale=5, elem_id="upload-panel"):
-            gr.Markdown(
-                """
+    with gr.Column(visible=True, elem_id="login-screen") as login_screen:
+        gr.HTML(
+            """
+            <div class="login-shell">
+              <div class="login-brand">
+                <div class="login-mark">ET</div>
+                <div>
+                  <div class="login-title">EvidenceTrace</div>
+                  <div class="login-subtitle">Cybersecurity assurance &amp; evidence quality control</div>
+                </div>
+              </div>
+              <div class="login-card">
+                <div class="login-eyebrow">Secure research workspace</div>
+                <div class="login-heading">Sign in to your review workspace.</div>
+                <div class="login-copy">
+                  Testers can analyze documents and generate result reports.
+                  Administrators can additionally access the application audit trail.
+                </div>
+              </div>
+            </div>
+            """
+        )
+
+        login_username = gr.Textbox(
+            label="Username",
+            placeholder="Enter username",
+        )
+
+        login_password = gr.Textbox(
+            label="Password",
+            type="password",
+            placeholder="Enter password",
+        )
+
+        login_btn = gr.Button(
+            "Sign in",
+            variant="primary",
+            elem_id="login-btn",
+        )
+
+        login_error = gr.Markdown(
+            "",
+            elem_id="login-message",
+        )
+
+        gr.HTML(
+            """
+            <div class="demo-credentials">
+              <b>Conference demo accounts</b><br>
+              Tester: <code>tester</code> / <code>demo123</code><br>
+              Administrator: <code>admin</code> / <code>1234</code>
+            </div>
+            """
+        )
+
+    # ========================================================
+    # Authenticated application
+    # ========================================================
+
+    with gr.Column(visible=False) as app_shell:
+
+        session_role = gr.State("Tester")
+
+        with gr.Row(elem_id="session-bar"):
+            session_badge = gr.Markdown("")
+            logout_btn = gr.Button(
+                "Sign out",
+                variant="secondary",
+                elem_id="logout-btn",
+            )
+
+        gr.HTML(HEADER_HTML)
+
+        with gr.Row():
+            with gr.Column(scale=5, elem_id="upload-panel"):
+                gr.Markdown(
+                    """
 <div class="section-title">Analyze an assurance document</div>
 <div class="section-subtitle">
 Upload a cybersecurity, audit, compliance, policy or assurance PDF.
-The prototype extracts claims and references locally, then performs evidence-quality screening.
+EvidenceTrace extracts claims and references and surfaces potential evidence-quality risks.
 </div>
-                """
-            )
-            pdf = gr.File(
-                label="PDF document",
-                file_types=[".pdf"],
-                type="filepath",
-            )
-            analyze_btn = gr.Button(
-                "Analyze Document",
-                elem_id="analyze-btn",
-                variant="primary",
-            )
+                    """
+                )
 
-        with gr.Column(scale=2, elem_id="download-panel"):
-            gr.Markdown(
-                """
+                pdf = gr.File(
+                    label="PDF document",
+                    file_types=[".pdf"],
+                    type="filepath",
+                )
+
+                analyze_btn = gr.Button(
+                    "Analyze Document",
+                    variant="primary",
+                    elem_id="analyze-btn",
+                )
+
+            with gr.Column(scale=2, elem_id="download-panel"):
+                gr.Markdown(
+                    """
 <div class="section-title">Publication output</div>
 <div class="section-subtitle">
-A one-page executive result report is generated after analysis.
+A one-page executive result report is generated automatically after analysis.
 </div>
-                """
-            )
-            report_file = gr.File(
-                label="Result report",
-                interactive=False,
-            )
-            gr.Markdown(
-                """
+                    """
+                )
+
+                report_file = gr.File(
+                    label="One-page result report",
+                    interactive=False,
+                )
+
+                gr.Markdown(
+                    """
 <div class="section-subtitle">
-<b>Report includes:</b><br>
+<b>Includes:</b><br>
 • Publication Gate<br>
 • Integrity score<br>
 • Citation metrics<br>
 • Key findings<br>
-• GRC interpretation<br>
-• Methodology note
+• GRC interpretation
 </div>
-                """
-            )
+                    """
+                )
 
-    gr.HTML(RESEARCH_NOTE)
+        gr.HTML(RESEARCH_NOTE)
 
-    gr.Markdown("## Analysis result")
+        gr.Markdown("## Analysis result")
 
-    summary = gr.HTML(
-        "<div class='section-card'><div class='section-title'>Ready for analysis</div>"
-        "<div class='section-subtitle'>Upload a PDF and select <b>Analyze Document</b>.</div></div>",
-        elem_id="summary-panel",
-    )
+        summary = gr.HTML(
+            "<div class='section-card'><div class='section-title'>Ready for analysis</div>"
+            "<div class='section-subtitle'>Upload a PDF and select <b>Analyze Document</b>.</div></div>",
+            elem_id="summary-panel",
+        )
 
-    with gr.Tabs():
-        with gr.Tab("EvidenceTrace Findings"):
-            findings = gr.Dataframe(
-                label="Findings requiring attention",
-                interactive=False,
-                wrap=True,
-                elem_id="findings-panel",
-            )
+        with gr.Tabs():
+            with gr.Tab("EvidenceTrace Findings"):
+                findings = gr.Dataframe(
+                    label="Findings requiring attention",
+                    interactive=False,
+                    wrap=True,
+                    elem_id="findings-panel",
+                )
 
-        with gr.Tab("Extracted References"):
-            refs = gr.Dataframe(
-                label="Reference Register",
-                interactive=False,
-                wrap=True,
-                elem_id="refs-panel",
-            )
+            with gr.Tab("Extracted References"):
+                refs = gr.Dataframe(
+                    label="Reference Register",
+                    interactive=False,
+                    wrap=True,
+                    elem_id="refs-panel",
+                )
 
-        with gr.Tab("Detected Claims"):
-            claims = gr.Dataframe(
-                label="Detected Evidence-Bearing Claims",
-                interactive=False,
-                wrap=True,
-                elem_id="claims-panel",
-            )
+            with gr.Tab("Detected Claims"):
+                claims = gr.Dataframe(
+                    label="Detected Evidence-Bearing Claims",
+                    interactive=False,
+                    wrap=True,
+                    elem_id="claims-panel",
+                )
 
-
-    with gr.Tabs():
-        with gr.Tab("Audit Trail"):
-            gr.Markdown(
-                """
+            with gr.Tab("Audit Trail", visible=False) as audit_tab:
+                gr.Markdown(
+                    """
 ### Administrator audit trail
 
-Use the administrator PIN to view application-level activity logs.
+This view records application activity without storing uploaded PDF contents.
 
-**Logged metadata:** timestamp, anonymous session ID, file name, analysis metrics,
-publication gate, integrity score, report-generation event, and errors.
-
-**Not stored:** uploaded PDF contents.
+**Logged:** timestamp, anonymous session ID, file name, analysis metrics,
+publication gate, integrity score, report generation and errors.
 """
-            )
-
-            with gr.Row():
-                admin_pin = gr.Textbox(
-                    label="Administrator PIN",
-                    type="password",
-                    placeholder="Enter admin PIN",
-                )
-                audit_limit = gr.Number(
-                    label="Maximum events",
-                    value=500,
-                    precision=0,
                 )
 
-            with gr.Row():
-                view_logs_btn = gr.Button(
-                    "View Audit Log",
-                    variant="primary",
+                with gr.Row():
+                    admin_pin = gr.Textbox(
+                        label="Administrator PIN",
+                        type="password",
+                        placeholder="Enter administrator PIN",
+                    )
+                    audit_limit = gr.Number(
+                        label="Maximum events",
+                        value=500,
+                        precision=0,
+                    )
+
+                with gr.Row():
+                    view_logs_btn = gr.Button(
+                        "View Audit Log",
+                        variant="primary",
+                    )
+                    export_logs_btn = gr.Button(
+                        "Export Audit CSV",
+                        variant="secondary",
+                    )
+                    clear_logs_btn = gr.Button(
+                        "Clear Audit Log",
+                        variant="stop",
+                    )
+
+                audit_status = gr.Markdown(
+                    "🔒 Administrator-only activity log."
                 )
-                clear_logs_btn = gr.Button(
-                    "Clear Audit Log",
-                    variant="stop",
+
+                audit_table = gr.Dataframe(
+                    label="Application Audit Events",
+                    interactive=False,
+                    wrap=True,
                 )
 
-            audit_status = gr.Markdown(
-                "🔒 Audit trail is administrator-restricted."
-            )
-
-            audit_table = gr.Dataframe(
-                label="Application Audit Events",
-                interactive=False,
-                wrap=True,
-            )
-
-            audit_download = gr.File(
-                label="Audit CSV export",
-                interactive=False,
-            )
-
-            def export_audit(pin, limit=500):
-                if str(pin or "").strip() != ADMIN_PIN:
-                    return "❌ Incorrect administrator PIN.", None
-
-                df = load_audit_dataframe(limit=int(limit))
-                export_path = Path(
-                    f"EvidenceTrace_Audit_Log_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.csv"
+                audit_download = gr.File(
+                    label="Audit CSV",
+                    interactive=False,
                 )
-                df.to_csv(export_path, index=False)
-                return f"✅ Export ready: {len(df)} event(s).", str(export_path)
 
-            def view_audit(pin, limit=500):
-                status, df = show_audit_log(pin, limit)
-                return status, df
+                view_logs_btn.click(
+                    fn=admin_view_audit,
+                    inputs=[admin_pin, audit_limit],
+                    outputs=[audit_status, audit_table],
+                )
 
-            def clear_audit(pin):
-                status, df = clear_audit_log(pin)
-                return status, df
+                export_logs_btn.click(
+                    fn=admin_export_audit,
+                    inputs=[admin_pin, audit_limit],
+                    outputs=[audit_status, audit_download],
+                )
 
-            view_logs_btn.click(
-                fn=view_audit,
-                inputs=[admin_pin, audit_limit],
-                outputs=[audit_status, audit_table],
-            )
+                clear_logs_btn.click(
+                    fn=admin_clear_audit,
+                    inputs=[admin_pin],
+                    outputs=[audit_status, audit_table],
+                )
 
-            clear_logs_btn.click(
-                fn=clear_audit,
-                inputs=admin_pin,
-                outputs=[audit_status, audit_table],
-            )
-
-            gr.Button("Export Audit CSV").click(
-                fn=export_audit,
-                inputs=[admin_pin, audit_limit],
-                outputs=[audit_status, audit_download],
-            )
-
-    gr.HTML(
-        """
+        gr.HTML(
+            """
 <div id="footer-note">
-  <div style="font-weight:800;color:#102a43;letter-spacing:.02em;">EvidenceTrace</div>
-  <div style="margin-top:3px;">
-    Cybersecurity Assurance • Evidence Integrity • GRC Quality Control • Audit Trail
-  </div>
+  <div>EvidenceTrace</div>
+  <div>Cybersecurity Assurance&nbsp;&nbsp;•&nbsp;&nbsp;Evidence Integrity&nbsp;&nbsp;•&nbsp;&nbsp;GRC Quality Control&nbsp;&nbsp;•&nbsp;&nbsp;Audit Trail</div>
   <div style="margin-top:5px;font-size:9px;">
-    Research Prototype &nbsp;|&nbsp; Activity metadata only &nbsp;|&nbsp; Human professional judgment remains mandatory
+    Research Prototype&nbsp;&nbsp;|&nbsp;&nbsp;Activity metadata only&nbsp;&nbsp;|&nbsp;&nbsp;Human professional judgment remains mandatory&nbsp;&nbsp;|&nbsp;&nbsp;Render-ready
   </div>
 </div>
-        """
-    )
+            """
+        )
+
+    # ========================================================
+    # Event wiring
+    # ========================================================
 
     analyze_btn.click(
         fn=run_analysis,
-        inputs=pdf,
+        inputs=[pdf, session_role],
         outputs=[summary, findings, refs, claims, report_file],
     )
 
+    login_btn.click(
+        fn=login_user,
+        inputs=[login_username, login_password],
+        outputs=[
+            login_screen,
+            app_shell,
+            session_badge,
+            login_error,
+            session_role,
+            audit_tab,
+        ],
+    )
+
+    logout_btn.click(
+        fn=logout_user,
+        inputs=[],
+        outputs=[
+            login_screen,
+            app_shell,
+            session_badge,
+            login_error,
+            session_role,
+            audit_tab,
+        ],
+    )
 
 if __name__ == "__main__":
-    demo.launch(share=True)
+    # Render supplies the public PORT environment variable.
+    # Local/Colab fallback is 7860.
+    port = int(os.getenv("PORT", "7860"))
+    demo.launch(
+        server_name="0.0.0.0",
+        server_port=port,
+        share=False,
+    )
