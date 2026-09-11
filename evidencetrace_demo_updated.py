@@ -2212,7 +2212,6 @@ publication gate, integrity score, report generation and errors.
                     interactive=False,
                     wrap=True,
                     value=pd.DataFrame(),
-                    height=420,
                 )
 
                 audit_download = gr.File(
