@@ -1075,6 +1075,17 @@ def run_analysis(file_obj):
 # ============================================================
 
 CUSTOM_CSS = """
+/* EvidenceTrace enterprise presentation layer */
+footer {
+    display: none !important;
+}
+
+.gradio-footer,
+footer,
+[data-testid="gradio-footer"] {
+    display: none !important;
+}
+
 :root {
     --navy: #0b1f33;
     --navy-2: #12324a;
@@ -1154,6 +1165,45 @@ body {
     font-size: 11px;
     font-weight: 700;
 }
+
+#et-header-line {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-top: 15px;
+    padding-top: 12px;
+    border-top: 1px solid rgba(255,255,255,.12);
+}
+
+#et-header-line span {
+    display: inline-block;
+    color: #b9cdd8;
+    background: rgba(255,255,255,.055);
+    border: 1px solid rgba(255,255,255,.10);
+    border-radius: 999px;
+    padding: 5px 9px;
+    font-size: 9px;
+    letter-spacing: .08em;
+    font-weight: 800;
+}
+
+#upload-panel .wrap,
+#download-panel .wrap {
+    color: var(--ink);
+}
+
+.gradio-container input[type="file"] {
+    border-color: var(--line) !important;
+}
+
+.gradio-container button {
+    transition: transform .15s ease, box-shadow .15s ease, filter .15s ease;
+}
+
+.gradio-container button:hover {
+    transform: translateY(-1px);
+}
+
 
 .section-card {
     background: var(--surface);
@@ -1320,21 +1370,31 @@ button, input, textarea, select {
 HEADER_HTML = """
 <div id="et-header">
   <div id="et-brand">
-    <div id="et-mark">↳</div>
+    <div id="et-mark">ET</div>
     <div>
       <div id="et-title">EvidenceTrace</div>
-      <div id="et-subtitle">AI-assisted cybersecurity assurance & evidence quality control</div>
+      <div id="et-subtitle">AI-assisted cybersecurity assurance &amp; evidence quality control</div>
     </div>
-    <div id="et-tag">GRC • ASSURANCE • CYBER RISK</div>
+    <div id="et-tag">GRC&nbsp;&nbsp;•&nbsp;&nbsp;ASSURANCE&nbsp;&nbsp;•&nbsp;&nbsp;CYBER RISK</div>
+  </div>
+  <div id="et-header-line">
+    <span>PRE-PUBLICATION QUALITY CONTROL</span>
+    <span>HUMAN-IN-THE-LOOP</span>
+    <span>EVIDENCE-TRACEABILITY</span>
   </div>
 </div>
 """
 
 RESEARCH_NOTE = """
 <div id="research-note">
-<b>How the prototype works:</b>
-EvidenceTrace screens a document through <b>claim → citation → reference → semantic support → GRC risk → publication gate</b>.
-It is designed to surface items for human review before publication. A similarity score is a screening signal, not proof of factual correctness.
+<div style="font-size:10px;letter-spacing:.08em;text-transform:uppercase;color:#0f766e;font-weight:800;margin-bottom:5px;">
+Evidence integrity workflow
+</div>
+<b>Claim → Citation → Reference → Semantic screening → GRC risk → Publication gate</b><br>
+<span style="color:#607483;">
+EvidenceTrace is a research prototype for surfacing potentially unsupported or weakly supported cybersecurity assurance claims.
+Similarity scores are screening signals, not proof of factual correctness. Final publication decisions require qualified human review.
+</span>
 </div>
 """
 
@@ -1439,7 +1499,13 @@ A one-page executive result report is generated after analysis.
     gr.HTML(
         """
 <div id="footer-note">
-EvidenceTrace research prototype · Designed for cybersecurity assurance and GRC quality-control research · Human verification remains mandatory
+  <div style="font-weight:800;color:#102a43;letter-spacing:.02em;">EvidenceTrace</div>
+  <div style="margin-top:3px;">
+    Cybersecurity Assurance • Evidence Integrity • GRC Quality Control
+  </div>
+  <div style="margin-top:5px;font-size:9px;">
+    Research Prototype &nbsp;|&nbsp; Human professional judgment remains mandatory
+  </div>
 </div>
         """
     )
@@ -1452,7 +1518,4 @@ EvidenceTrace research prototype · Designed for cybersecurity assurance and GRC
 
 
 if __name__ == "__main__":
-    demo.launch(
-        server_name="0.0.0.0",
-        server_port=7860
-    )
+    demo.launch(share=True)
