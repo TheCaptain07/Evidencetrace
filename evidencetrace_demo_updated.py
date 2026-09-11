@@ -1,6 +1,12 @@
 
 import re
 import html
+import os
+import sqlite3
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+
 import pymupdf
 import pandas as pd
 import numpy as np
@@ -20,6 +26,192 @@ from sklearn.metrics.pairwise import cosine_similarity
 # ============================================================
 # EvidenceTrace — citation/evidence traceability prototype
 # ============================================================
+
+# ============================================================
+# Audit trail / activity log
+# ============================================================
+# SQLite is used because it is dependency-free and provides a
+# real application-level audit trail. No uploaded PDF contents
+# are stored; only metadata and analysis outcomes are recorded.
+#
+# For a public deployment, set EVIDENCETRACE_ADMIN_PIN as an
+# environment secret. The fallback PIN is intended only for the
+# research/demo environment.
+# ============================================================
+
+AUDIT_DB = Path(
+    os.getenv("EVIDENCETRACE_AUDIT_DB", "evidencetrace_audit.db")
+)
+ADMIN_PIN = os.getenv("EVIDENCETRACE_ADMIN_PIN", "1234")
+
+
+def db_connect():
+    conn = sqlite3.connect(
+        AUDIT_DB,
+        check_same_thread=False,
+        timeout=10,
+    )
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_audit_db():
+    conn = db_connect()
+    try:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS audit_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_id TEXT NOT NULL UNIQUE,
+                timestamp_utc TEXT NOT NULL,
+                session_id TEXT,
+                event_type TEXT NOT NULL,
+                file_name TEXT,
+                file_size_bytes INTEGER,
+                pages INTEGER,
+                claims INTEGER,
+                citations INTEGER,
+                references_count INTEGER,
+                resolved_citations INTEGER,
+                unresolved_citations INTEGER,
+                supported_claims INTEGER,
+                weak_claims INTEGER,
+                unsupported_claims INTEGER,
+                high_findings INTEGER,
+                medium_findings INTEGER,
+                publication_gate TEXT,
+                integrity_score INTEGER,
+                report_generated INTEGER DEFAULT 0,
+                error_message TEXT
+            )
+            """
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def audit_write(
+    *,
+    event_type,
+    session_id="",
+    file_name="",
+    file_size_bytes=None,
+    pages=None,
+    claims=None,
+    citations=None,
+    references_count=None,
+    resolved_citations=None,
+    unresolved_citations=None,
+    supported_claims=None,
+    weak_claims=None,
+    unsupported_claims=None,
+    high_findings=None,
+    medium_findings=None,
+    publication_gate="",
+    integrity_score=None,
+    report_generated=False,
+    error_message="",
+):
+    init_audit_db()
+    conn = db_connect()
+    try:
+        conn.execute(
+            """
+            INSERT INTO audit_events (
+                event_id, timestamp_utc, session_id, event_type,
+                file_name, file_size_bytes, pages, claims, citations,
+                references_count, resolved_citations, unresolved_citations,
+                supported_claims, weak_claims, unsupported_claims,
+                high_findings, medium_findings, publication_gate,
+                integrity_score, report_generated, error_message
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                str(uuid.uuid4()),
+                datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                session_id,
+                event_type,
+                file_name,
+                file_size_bytes,
+                pages,
+                claims,
+                citations,
+                references_count,
+                resolved_citations,
+                unresolved_citations,
+                supported_claims,
+                weak_claims,
+                unsupported_claims,
+                high_findings,
+                medium_findings,
+                publication_gate,
+                integrity_score,
+                1 if report_generated else 0,
+                error_message,
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def load_audit_dataframe(limit=500):
+    init_audit_db()
+    conn = db_connect()
+    try:
+        rows = conn.execute(
+            """
+            SELECT
+                id, event_id, timestamp_utc, session_id, event_type,
+                file_name, pages, claims, citations, references_count,
+                resolved_citations, unresolved_citations,
+                supported_claims, weak_claims, unsupported_claims,
+                high_findings, medium_findings, publication_gate,
+                integrity_score, report_generated, error_message
+            FROM audit_events
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (int(limit),),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    columns = [
+        "id", "event_id", "timestamp_utc", "session_id", "event_type",
+        "file_name", "pages", "claims", "citations", "references_count",
+        "resolved_citations", "unresolved_citations",
+        "supported_claims", "weak_claims", "unsupported_claims",
+        "high_findings", "medium_findings", "publication_gate",
+        "integrity_score", "report_generated", "error_message",
+    ]
+
+    if not rows:
+        return pd.DataFrame(columns=columns)
+
+    return pd.DataFrame([dict(row) for row in rows], columns=columns)
+
+
+def clear_audit_log(pin):
+    if str(pin or "").strip() != ADMIN_PIN:
+        return "❌ Incorrect administrator PIN.", load_audit_dataframe()
+
+    init_audit_db()
+    conn = db_connect()
+    try:
+        conn.execute("DELETE FROM audit_events")
+        conn.commit()
+    finally:
+        conn.close()
+
+    audit_write(event_type="ADMIN_LOG_CLEARED", session_id="ADMIN")
+    return "✅ Audit log cleared.", load_audit_dataframe()
+
+
+init_audit_db()
+
 # This is a research prototype. Semantic similarity is only a
 # screening signal; it does NOT prove factual correctness.
 # Human verification remains mandatory.
@@ -955,7 +1147,7 @@ def create_result_report(
 
 
 
-def run_analysis(file_obj):
+def run_analysis(file_obj, request: gr.Request = None):
     if file_obj is None:
         return (
             "<h2>Please upload a PDF.</h2>",
@@ -965,11 +1157,24 @@ def run_analysis(file_obj):
             None,
         )
 
+    session_id = ""
+    try:
+        session_id = getattr(request, "session_hash", "") or ""
+    except Exception:
+        session_id = ""
+
+    # Use a fresh anonymous session identifier when the hosting
+    # environment does not expose a Gradio session hash.
+    if not session_id:
+        session_id = f"anon-{uuid.uuid4().hex[:12]}"
+
     try:
         path = file_obj if isinstance(file_obj, str) else file_obj.name
+        file_name = Path(path).name
+        file_size = Path(path).stat().st_size if Path(path).exists() else None
+
         summary_html, findings_df, ref_df, claim_df = analyze(path)
 
-        # Re-run lightweight extraction of metrics for the downloadable report.
         pages = extract_pdf(path)
         refs = extract_references(pages)
         citations = extract_citations(pages)
@@ -985,6 +1190,7 @@ def run_analysis(file_obj):
 
         for c in claims_data:
             cited_ids = c["citation_ids"]
+
             if not cited_ids:
                 unsupported_count += 1
                 continue
@@ -995,11 +1201,19 @@ def run_analysis(file_obj):
                 continue
 
             best_score = 0.0
+
             for rid in resolved_ids:
                 idx = ref_ids.index(rid)
-                ranked = semantic_match(c["claim"], [ref_texts[idx]])
+                ranked = semantic_match(
+                    c["claim"],
+                    [ref_texts[idx]],
+                )
+
                 if ranked:
-                    best_score = max(best_score, ranked[0][1])
+                    best_score = max(
+                        best_score,
+                        ranked[0][1],
+                    )
 
             if best_score >= 0.18:
                 supported_count += 1
@@ -1010,32 +1224,46 @@ def run_analysis(file_obj):
 
         high_findings = (
             int((findings_df["severity"] == "HIGH").sum())
-            if not findings_df.empty and "severity" in findings_df.columns
+            if not findings_df.empty
+            and "severity" in findings_df.columns
             else 0
         )
+
         medium_findings = (
             int((findings_df["severity"] == "MEDIUM").sum())
-            if not findings_df.empty and "severity" in findings_df.columns
+            if not findings_df.empty
+            and "severity" in findings_df.columns
             else 0
         )
 
         total_claims = len(claims_data)
         total_citations = len(citations)
-        resolution_rate = round(
-            100 * resolved / total_citations, 1
-        ) if total_citations else 0.0
-        support_rate = round(
-            100 * supported_count / total_claims, 1
-        ) if total_claims else 0.0
 
-        # Keep the same transparent scoring logic as analyze().
+        resolution_rate = (
+            round(100 * resolved / total_citations, 1)
+            if total_citations
+            else 0.0
+        )
+
+        support_rate = (
+            round(100 * supported_count / total_claims, 1)
+            if total_claims
+            else 0.0
+        )
+
         score = 100
         score -= min(45, unresolved * 4)
         score -= min(30, high_findings * 5)
         score -= min(20, medium_findings * 1.5)
         score = max(0, round(score))
 
-        gate = "BLOCK" if high_findings > 0 else "REVIEW" if medium_findings > 0 else "PASS"
+        gate = (
+            "BLOCK"
+            if high_findings > 0
+            else "REVIEW"
+            if medium_findings > 0
+            else "PASS"
+        )
 
         report_path = create_result_report(
             pdf_name=path,
@@ -1057,9 +1285,62 @@ def run_analysis(file_obj):
             findings_df=findings_df,
         )
 
-        return summary_html, findings_df, ref_df, claim_df, report_path
+        # -----------------------------------------------
+        # Application-level audit trail
+        # -----------------------------------------------
+        audit_write(
+            event_type="ANALYSIS",
+            session_id=session_id,
+            file_name=file_name,
+            file_size_bytes=file_size,
+            pages=len(pages),
+            claims=total_claims,
+            citations=total_citations,
+            references_count=len(refs),
+            resolved_citations=resolved,
+            unresolved_citations=unresolved,
+            supported_claims=supported_count,
+            weak_claims=weak_count,
+            unsupported_claims=unsupported_count,
+            high_findings=high_findings,
+            medium_findings=medium_findings,
+            publication_gate=gate,
+            integrity_score=score,
+            report_generated=True,
+        )
+
+        audit_write(
+            event_type="REPORT_GENERATED",
+            session_id=session_id,
+            file_name=file_name,
+            pages=len(pages),
+            publication_gate=gate,
+            integrity_score=score,
+            report_generated=True,
+        )
+
+        return (
+            summary_html,
+            findings_df,
+            ref_df,
+            claim_df,
+            report_path,
+        )
 
     except Exception as exc:
+        try:
+            audit_write(
+                event_type="ANALYSIS_ERROR",
+                session_id=session_id,
+                file_name=Path(
+                    file_obj if isinstance(file_obj, str)
+                    else getattr(file_obj, "name", "unknown.pdf")
+                ).name,
+                error_message=str(exc),
+            )
+        except Exception:
+            pass
+
         return (
             f"<h2>Analysis error</h2><pre>{html.escape(str(exc))}</pre>",
             pd.DataFrame(),
@@ -1069,9 +1350,49 @@ def run_analysis(file_obj):
         )
 
 
+def show_audit_log(pin, limit=500):
+    if str(pin or "").strip() != ADMIN_PIN:
+        return (
+            "🔒 Enter the correct administrator PIN to view the audit trail.",
+            pd.DataFrame(),
+        )
+
+    df = load_audit_dataframe(limit=int(limit))
+
+    if df.empty:
+        return (
+            "✅ Administrator access granted. No audit events recorded yet.",
+            df,
+        )
+
+    analyses = df[df["event_type"] == "ANALYSIS"]
+    blocked = int((analyses["publication_gate"] == "BLOCK").sum())
+    review = int((analyses["publication_gate"] == "REVIEW").sum())
+    passed = int((analyses["publication_gate"] == "PASS").sum())
+
+    overview = f"""
+### Audit Trail
+
+**Access:** ✅ Administrator
+
+| Activity | Count |
+|---|---:|
+| Total audit events | {len(df)} |
+| Document analyses | {len(analyses)} |
+| Publication BLOCK | {blocked} |
+| Publication REVIEW | {review} |
+| Publication PASS | {passed} |
+
+The detailed event log is shown below. Uploaded document contents are **not stored** by EvidenceTrace.
+"""
+
+    return overview, df
+
 
 # ============================================================
 # Professional Gradio UI
+# ============================================================
+
 # ============================================================
 
 CUSTOM_CSS = """
@@ -1336,6 +1657,17 @@ body {
     border-bottom: 2px solid var(--teal) !important;
 }
 
+
+#et-audit-badge {
+    background: #eef5f7;
+    border: 1px solid #d5e4e8;
+    color: #274c5b;
+    border-radius: 10px;
+    padding: 9px 11px;
+    font-size: 10px;
+    line-height: 1.5;
+}
+
 #research-note {
     background: linear-gradient(135deg, #eef8f6, #f5fafb);
     border: 1px solid #cce8e2;
@@ -1496,15 +1828,105 @@ A one-page executive result report is generated after analysis.
                 elem_id="claims-panel",
             )
 
+
+    with gr.Tabs():
+        with gr.Tab("Audit Trail"):
+            gr.Markdown(
+                """
+### Administrator audit trail
+
+Use the administrator PIN to view application-level activity logs.
+
+**Logged metadata:** timestamp, anonymous session ID, file name, analysis metrics,
+publication gate, integrity score, report-generation event, and errors.
+
+**Not stored:** uploaded PDF contents.
+"""
+            )
+
+            with gr.Row():
+                admin_pin = gr.Textbox(
+                    label="Administrator PIN",
+                    type="password",
+                    placeholder="Enter admin PIN",
+                )
+                audit_limit = gr.Number(
+                    label="Maximum events",
+                    value=500,
+                    precision=0,
+                )
+
+            with gr.Row():
+                view_logs_btn = gr.Button(
+                    "View Audit Log",
+                    variant="primary",
+                )
+                clear_logs_btn = gr.Button(
+                    "Clear Audit Log",
+                    variant="stop",
+                )
+
+            audit_status = gr.Markdown(
+                "🔒 Audit trail is administrator-restricted."
+            )
+
+            audit_table = gr.Dataframe(
+                label="Application Audit Events",
+                interactive=False,
+                wrap=True,
+            )
+
+            audit_download = gr.File(
+                label="Audit CSV export",
+                interactive=False,
+            )
+
+            def export_audit(pin, limit=500):
+                if str(pin or "").strip() != ADMIN_PIN:
+                    return "❌ Incorrect administrator PIN.", None
+
+                df = load_audit_dataframe(limit=int(limit))
+                export_path = Path(
+                    f"EvidenceTrace_Audit_Log_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}.csv"
+                )
+                df.to_csv(export_path, index=False)
+                return f"✅ Export ready: {len(df)} event(s).", str(export_path)
+
+            def view_audit(pin, limit=500):
+                status, df = show_audit_log(pin, limit)
+                return status, df
+
+            def clear_audit(pin):
+                status, df = clear_audit_log(pin)
+                return status, df
+
+            view_logs_btn.click(
+                fn=view_audit,
+                inputs=[admin_pin, audit_limit],
+                outputs=[audit_status, audit_table],
+            )
+
+            clear_logs_btn.click(
+                fn=clear_audit,
+                inputs=admin_pin,
+                outputs=[audit_status, audit_table],
+            )
+
+            gr.Button("Export Audit CSV").click(
+                fn=export_audit,
+                inputs=[admin_pin, audit_limit],
+                outputs=[audit_status, audit_download],
+            )
+
     gr.HTML(
         """
 <div id="footer-note">
   <div style="font-weight:800;color:#102a43;letter-spacing:.02em;">EvidenceTrace</div>
   <div style="margin-top:3px;">
-    Cybersecurity Assurance • Evidence Integrity • GRC Quality Control
+    Cybersecurity Assurance • Evidence Integrity • GRC Quality Control • Audit Trail
   </div>
   <div style="margin-top:5px;font-size:9px;">
-    Research Prototype &nbsp;|&nbsp; Human professional judgment remains mandatory
+    Research Prototype &nbsp;|&nbsp; Activity metadata only &nbsp;|&nbsp; Human professional judgment remains mandatory
   </div>
 </div>
         """
